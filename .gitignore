@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Media / Data
+*.jpg
+*.png
+*.mp4
+*.avi
+
+# Logs
+*.log
+
+# Model files
+*.task
+
