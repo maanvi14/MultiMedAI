@@ -19,3 +19,14 @@ Thumbs.db
 # Model files
 *.task
 
+# =========================
+# Biometric & Sensitive Data
+# =========================
+
+captured_images/
+golden_meshes/
+
+# Optional safety (if you add these later)
+*.jpg
+*.png
+*.json

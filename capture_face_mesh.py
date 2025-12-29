@@ -1,16 +1,3 @@
-"""
-capture_face_mesh.py
-
-MASTER ORCHESTRATOR (Live Capture UI)
-------------------------------------
-- Layer 0: Auto-Calibration (Press C)
-- Layer 1: Face capture & geometry
-- Layer 2: Pose gatekeeper (MODE-AWARE)
-- Layer 3A: Quality gatekeeper (MODE-AWARE)
-- Layer 3B: Stability gatekeeper
-- Multi-view Golden Mesh Capture
-"""
-
 import cv2
 import numpy as np
 import mediapipe as mp
@@ -30,7 +17,16 @@ from stability_gatekeeper import StabilityGatekeeper
 CAPTURE_SEQUENCE = ["FRONTAL", "LEFT_PROFILE", "RIGHT_PROFILE"]
 current_capture_index = 0
 current_capture_mode = CAPTURE_SEQUENCE[current_capture_index]
+
 golden_meshes = {}
+
+# -------------------------------------------------
+# UI State
+# -------------------------------------------------
+
+last_capture_time = None
+last_captured_mode = None
+CAPTURE_DISPLAY_MS = 2000
 
 # -------------------------------------------------
 # Calibration
@@ -59,13 +55,18 @@ options = vision.FaceLandmarkerOptions(
 # Helpers
 # -------------------------------------------------
 
-def save_golden_mesh(data, mode, output_dir="golden_meshes"):
-    os.makedirs(output_dir, exist_ok=True)
+def save_golden_mesh(data, mode):
+    os.makedirs("golden_meshes", exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = os.path.join(output_dir, f"golden_mesh_{mode}_{ts}.json")
+    path = f"golden_meshes/golden_mesh_{mode}_{ts}.json"
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
-    print(f"[SAVED] {mode} → {path}")
+
+def save_face_image(frame, mode):
+    os.makedirs("captured_images", exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = f"captured_images/{mode}_{ts}.jpg"
+    cv2.imwrite(path, frame)
 
 def draw_face_box(frame, landmarks, color, w, h, pad=20):
     xs = [lm.x * w for lm in landmarks]
@@ -79,7 +80,7 @@ def mode_instruction(mode):
         "FRONTAL": "Face the camera",
         "LEFT_PROFILE": "Turn face LEFT",
         "RIGHT_PROFILE": "Turn face RIGHT"
-    }.get(mode, "")
+    }[mode]
 
 # -------------------------------------------------
 # Camera
@@ -94,8 +95,6 @@ cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
 cv2.setWindowProperty(WINDOW, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
 stability = StabilityGatekeeper(required_frames=60)
-
-print("[INFO] Press C to calibrate | ESC to exit")
 
 # -------------------------------------------------
 # Main Loop
@@ -118,30 +117,25 @@ with vision.FaceLandmarker.create_from_options(options) as landmarker:
         status_text = f"{current_capture_mode}: {mode_instruction(current_capture_mode)}"
         box_color = (0,0,255)
 
-        if result.face_landmarks:
+        # ---------- SAFE Capture Confirmation ----------
+        if (
+            last_capture_time is not None and
+            last_captured_mode is not None and
+            ts_ms - last_capture_time < CAPTURE_DISPLAY_MS
+        ):
+            status_text = f"✓ {last_captured_mode} CAPTURED"
+            box_color = (0,255,0)
+
+        elif result.face_landmarks:
             face = result.face_landmarks[0]
             landmarks_3d = np.array([[lm.x,lm.y,lm.z] for lm in face])
 
-            # ---------- Calibration ----------
-            if calibrating and result.face_blendshapes:
-                calibration_buffer.append(
-                    {b.category_name:b.score for b in result.face_blendshapes[0]}
-                )
-                if len(calibration_buffer) >= CALIBRATION_FRAMES:
-                    baseline_expression = {
-                        k: np.mean([f.get(k,0) for f in calibration_buffer])
-                        for k in calibration_buffer[0]
-                    }
-                    calibrating = False
-                    calibration_buffer.clear()
-                    print("[CALIBRATION DONE]")
-
-            # ---------- Pose Gate ----------
+            # ---------- Pose ----------
             transform = result.facial_transformation_matrixes[0]
             pose = estimate_head_pose_from_matrix(transform)
-            pose_ok = pose is not None and is_pose_valid(pose, mode=current_capture_mode)
+            pose_ok = pose and is_pose_valid(pose, mode=current_capture_mode)
 
-            # ---------- Quality Gate ----------
+            # ---------- Quality ----------
             quality = check_frame_quality(
                 frame,
                 face,
@@ -165,10 +159,14 @@ with vision.FaceLandmarker.create_from_options(options) as landmarker:
                     "timestamp": ts_ms,
                     "mesh_3d": landmarks_3d.tolist(),
                     "transform": transform.tolist(),
-                    "baseline_expression": baseline_expression,
                     "metrics": quality
                 }
+
                 save_golden_mesh(golden_meshes[current_capture_mode], current_capture_mode)
+                save_face_image(frame, current_capture_mode)
+
+                last_capture_time = ts_ms
+                last_captured_mode = current_capture_mode
 
                 current_capture_index += 1
                 stability.reset()
@@ -180,30 +178,40 @@ with vision.FaceLandmarker.create_from_options(options) as landmarker:
                     box_color = (255,255,255)
 
             elif not pose_ok:
-                status_text = f"{current_capture_mode}: {mode_instruction(current_capture_mode)}"
+                status_text = mode_instruction(current_capture_mode)
 
             elif not quality_ok:
                 status_text = quality["message"]
 
             elif not ready:
-                status_text = f"{current_capture_mode}: Hold still"
+                status_text = "Hold still..."
                 box_color = (0,255,255)
 
+            # ---------- GREEN MESH ----------
+            for lm in face:
+                cx, cy = int(lm.x*w), int(lm.y*h)
+                cv2.circle(frame, (cx,cy), 1, (0,255,0), -1)
+
             draw_face_box(frame, face, box_color, w, h)
+
+            # ---------- Distance ----------
+            if quality.get("distance_cm"):
+                cv2.putText(
+                    frame,
+                    f"Distance: {quality['distance_cm']} cm",
+                    (40, h-80),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (255,255,255),
+                    2
+                )
 
         cv2.putText(frame, status_text, (40,60),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.2, box_color, 3)
 
         cv2.imshow(WINDOW, frame)
 
-        key = cv2.waitKey(5) & 0xFF
-        if key == ord('c'):
-            calibrating = True
-            calibration_buffer.clear()
-            baseline_expression = None
-            stability.reset()
-            print("[CALIBRATION STARTED]")
-        if key == 27:
+        if cv2.waitKey(5) & 0xFF == 27:
             break
 
 cap.release()
