@@ -2,7 +2,7 @@
 __pycache__/
 *.pyc
 venv/
-
+.venv
 # OS
 .DS_Store
 Thumbs.db
@@ -22,11 +22,15 @@ Thumbs.db
 # =========================
 # Biometric & Sensitive Data
 # =========================
-
+captured/
 captured_images/
 golden_meshes/
+consents/
 
 # Optional safety (if you add these later)
 *.jpg
 *.png
 *.json
+# Sensitive / local files
+consent_key.bin
+device_participant_id.txt

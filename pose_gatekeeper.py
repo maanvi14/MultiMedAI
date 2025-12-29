@@ -40,43 +40,53 @@ def estimate_head_pose_from_matrix(transform_matrix):
 def is_pose_valid(pose, mode="FRONTAL"):
     """
     Mode-aware pose validation.
+
+    Returns a dict:{"valid": bool, "reason": str, "metrics": {...}}
     """
+    yaw = float(pose.get("yaw", 0))
+    pitch = float(pose.get("pitch", 0))
+    roll = float(pose.get("roll", 0))
 
-    yaw   = pose["yaw"]
-    pitch = pose["pitch"]
-    roll  = pose["roll"]
+    # Configurable thresholds (tuned for robustness in lower-quality cameras)
+    FRONTAL_YAW_MAX = 12.0
+    FRONTAL_PITCH_MAX = 12.0
+    FRONTAL_ROLL_MAX = 10.0
 
-    # -------------------------------
-    # FRONTAL CAPTURE
-    # -------------------------------
+    PROFILE_YAW_MIN = 28.0
+    PROFILE_YAW_MAX = 70.0
+    PROFILE_PITCH_MAX = 18.0
+    PROFILE_ROLL_MAX = 12.0
+
+    metrics = {"yaw": yaw, "pitch": pitch, "roll": roll}
+
+    # FRONTAL
     if mode == "FRONTAL":
-        return (
-            abs(yaw)   <= 12 and
-            abs(pitch) <= 12 and
-            abs(roll)  <= 8
-        )
+        if abs(yaw) > FRONTAL_YAW_MAX:
+            return {"valid": False, "reason": "Please face forward (center your face)", "metrics": metrics}
+        if abs(pitch) > FRONTAL_PITCH_MAX:
+            return {"valid": False, "reason": "Adjust head pitch", "metrics": metrics}
+        if abs(roll) > FRONTAL_ROLL_MAX:
+            return {"valid": False, "reason": "Reduce head tilt", "metrics": metrics}
+        return {"valid": True, "reason": "Pose OK", "metrics": metrics}
 
-    # -------------------------------
-    # LEFT PROFILE CAPTURE
-    # -------------------------------
-    elif mode == "LEFT_PROFILE":
-        return (
-            -60 <= yaw <= -30 and   # face turned LEFT
-            abs(pitch) <= 15 and
-            abs(roll)  <= 10
-        )
+    # LEFT PROFILE: yaw should be sufficiently negative
+    if mode == "LEFT_PROFILE":
+        if not ( -PROFILE_YAW_MAX <= yaw <= -PROFILE_YAW_MIN ):
+            return {"valid": False, "reason": "Turn face LEFT more", "metrics": metrics}
+        if abs(pitch) > PROFILE_PITCH_MAX:
+            return {"valid": False, "reason": "Adjust head pitch", "metrics": metrics}
+        if abs(roll) > PROFILE_ROLL_MAX:
+            return {"valid": False, "reason": "Reduce head tilt", "metrics": metrics}
+        return {"valid": True, "reason": "Pose OK", "metrics": metrics}
 
-    # -------------------------------
-    # RIGHT PROFILE CAPTURE
-    # -------------------------------
-    elif mode == "RIGHT_PROFILE":
-        return (
-            30 <= yaw <= 60 and     # face turned RIGHT
-            abs(pitch) <= 15 and
-            abs(roll)  <= 10
-        )
+    # RIGHT PROFILE: yaw should be sufficiently positive
+    if mode == "RIGHT_PROFILE":
+        if not ( PROFILE_YAW_MIN <= yaw <= PROFILE_YAW_MAX ):
+            return {"valid": False, "reason": "Turn face RIGHT more", "metrics": metrics}
+        if abs(pitch) > PROFILE_PITCH_MAX:
+            return {"valid": False, "reason": "Adjust head pitch", "metrics": metrics}
+        if abs(roll) > PROFILE_ROLL_MAX:
+            return {"valid": False, "reason": "Reduce head tilt", "metrics": metrics}
+        return {"valid": True, "reason": "Pose OK", "metrics": metrics}
 
-    # -------------------------------
-    # UNKNOWN MODE (fail safe)
-    # -------------------------------
-    return False
+    return {"valid": False, "reason": "Unknown capture mode", "metrics": metrics}

@@ -5,6 +5,9 @@ from mediapipe.tasks.python import vision
 from mediapipe.tasks import python
 import json, os
 from datetime import datetime
+import uuid
+
+from consent import create_consent, persist_consent, verify_consent_token
 
 from pose_gatekeeper import estimate_head_pose_from_matrix, is_pose_valid
 from quality_gatekeeper import check_frame_quality
@@ -56,17 +59,24 @@ options = vision.FaceLandmarkerOptions(
 # -------------------------------------------------
 
 def save_golden_mesh(data, mode):
-    os.makedirs("golden_meshes", exist_ok=True)
+    # save into per-participant folder if participant_id is present
+    base = os.path.join("captured", getattr(globals(), 'participant_id', 'unknown'))
+    dirpath = os.path.join(base, "golden_meshes")
+    os.makedirs(dirpath, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = f"golden_meshes/golden_mesh_{mode}_{ts}.json"
+    path = os.path.join(dirpath, f"golden_mesh_{mode}_{ts}.json")
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
+    return path
 
 def save_face_image(frame, mode):
-    os.makedirs("captured_images", exist_ok=True)
+    base = os.path.join("captured", getattr(globals(), 'participant_id', 'unknown'))
+    dirpath = os.path.join(base, "images")
+    os.makedirs(dirpath, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = f"captured_images/{mode}_{ts}.jpg"
+    path = os.path.join(dirpath, f"{mode}_{ts}.jpg")
     cv2.imwrite(path, frame)
+    return path
 
 def draw_face_box(frame, landmarks, color, w, h, pad=20):
     xs = [lm.x * w for lm in landmarks]
@@ -97,6 +107,53 @@ cv2.setWindowProperty(WINDOW, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 stability = StabilityGatekeeper(required_frames=60)
 
 # -------------------------------------------------
+# Consent workflow
+# -------------------------------------------------
+consent_token = None
+consent_record = None
+
+def show_consent_overlay(frame):
+    h, w, _ = frame.shape
+    overlay = frame.copy()
+    lines = [
+        "EXPLICIT CONSENT REQUIRED",
+        "Press 'c' to CONSENT and continue",
+        "Press 'd' to DECLINE and exit",
+        "Press 'v' to VIEW consent text in terminal"
+    ]
+    y = 80
+    for i, ln in enumerate(lines):
+        cv2.putText(overlay, ln, (40, y + i * 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
+    return overlay
+
+def _load_or_create_device_participant_id(path='device_participant_id.txt'):
+    try:
+        if os.path.exists(path):
+            with open(path, 'r') as f:
+                pid = f.read().strip()
+                if pid:
+                    return pid
+        pid = 'device-' + str(uuid.uuid4())
+        with open(path, 'w') as f:
+            f.write(pid)
+        try:
+            os.chmod(path, 0o600)
+        except Exception:
+            pass
+        return pid
+    except Exception:
+        return 'device-' + str(uuid.uuid4())
+
+# device-local persistent participant id (auto-generated)
+participant_id = _load_or_create_device_participant_id()
+
+CONSENT_TEXT = (
+    "This device will capture a 3D facial mesh and images for Ayurvedic Prakriti analysis. "
+    "Data will be stored locally and can be uploaded to a secure backend with your consent. "
+    "You may withdraw consent before upload."
+)
+
+# -------------------------------------------------
 # Main Loop
 # -------------------------------------------------
 
@@ -109,6 +166,28 @@ with vision.FaceLandmarker.create_from_options(options) as landmarker:
 
         frame = cv2.flip(frame, 1)
         h, w, _ = frame.shape
+
+        # If consent not yet given, show overlay and wait for user action
+        if consent_token is None:
+            overlay = show_consent_overlay(frame)
+            cv2.imshow(WINDOW, overlay)
+            key = cv2.waitKey(5) & 0xFF
+            if key == ord('v'):
+                print("\n--- CONSENT TEXT ---\n", CONSENT_TEXT, "\n--- END CONSENT ---\n")
+            elif key == ord('c'):
+                token, rec = create_consent(participant_id, metadata={"modes": CAPTURE_SEQUENCE})
+                consent_dir = os.path.join("captured", participant_id, "consent")
+                path = persist_consent(token, rec, directory=consent_dir)
+                if verify_consent_token(token):
+                    consent_token = token
+                    consent_record = rec
+                    print(f"Consent saved: {path}")
+                else:
+                    print("Failed to verify consent token after creation.")
+            elif key == ord('d'):
+                print("Consent declined. Exiting.")
+                break
+            continue
 
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame)
         ts_ms = int(cv2.getTickCount()/cv2.getTickFrequency()*1000)
@@ -133,7 +212,8 @@ with vision.FaceLandmarker.create_from_options(options) as landmarker:
             # ---------- Pose ----------
             transform = result.facial_transformation_matrixes[0]
             pose = estimate_head_pose_from_matrix(transform)
-            pose_ok = pose and is_pose_valid(pose, mode=current_capture_mode)
+            pose_result = is_pose_valid(pose, mode=current_capture_mode) if pose else {"valid": False, "reason": "No pose detected", "metrics": {}}
+            pose_ok = pose_result.get("valid", False)
 
             # ---------- Quality ----------
             quality = check_frame_quality(
@@ -162,8 +242,9 @@ with vision.FaceLandmarker.create_from_options(options) as landmarker:
                     "metrics": quality
                 }
 
-                save_golden_mesh(golden_meshes[current_capture_mode], current_capture_mode)
-                save_face_image(frame, current_capture_mode)
+                mesh_path = save_golden_mesh(golden_meshes[current_capture_mode], current_capture_mode)
+                img_path = save_face_image(frame, current_capture_mode)
+                golden_meshes[current_capture_mode]["saved_files"] = {"mesh": mesh_path, "image": img_path}
 
                 last_capture_time = ts_ms
                 last_captured_mode = current_capture_mode
@@ -178,7 +259,7 @@ with vision.FaceLandmarker.create_from_options(options) as landmarker:
                     box_color = (255,255,255)
 
             elif not pose_ok:
-                status_text = mode_instruction(current_capture_mode)
+                status_text = pose_result.get("reason", mode_instruction(current_capture_mode))
 
             elif not quality_ok:
                 status_text = quality["message"]
