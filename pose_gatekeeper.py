@@ -1,13 +1,16 @@
 """
 pose_gatekeeper.py
 
-LAYER 2: Pose Gatekeeper (MediaPipe-native)
-------------------------------------------
-Uses MediaPipe facial transformation matrix
-to estimate head orientation reliably.
+LAYER 2: Pose Gatekeeper (MODE-AWARE)
+------------------------------------
+Validates head pose based on capture mode:
+- FRONTAL
+- LEFT_PROFILE
+- RIGHT_PROFILE
 """
 
 import numpy as np
+
 
 def estimate_head_pose_from_matrix(transform_matrix):
     """
@@ -34,12 +37,46 @@ def estimate_head_pose_from_matrix(transform_matrix):
     }
 
 
-def is_pose_valid(pose, yaw_thresh=12, pitch_thresh=12, roll_thresh=8):
+def is_pose_valid(pose, mode="FRONTAL"):
     """
-    Strict but correct thresholds (now meaningful).
+    Mode-aware pose validation.
     """
-    return (
-        abs(pose["yaw"])   <= yaw_thresh and
-        abs(pose["pitch"]) <= pitch_thresh and
-        abs(pose["roll"])  <= roll_thresh
-    )
+
+    yaw   = pose["yaw"]
+    pitch = pose["pitch"]
+    roll  = pose["roll"]
+
+    # -------------------------------
+    # FRONTAL CAPTURE
+    # -------------------------------
+    if mode == "FRONTAL":
+        return (
+            abs(yaw)   <= 12 and
+            abs(pitch) <= 12 and
+            abs(roll)  <= 8
+        )
+
+    # -------------------------------
+    # LEFT PROFILE CAPTURE
+    # -------------------------------
+    elif mode == "LEFT_PROFILE":
+        return (
+            -60 <= yaw <= -30 and   # face turned LEFT
+            abs(pitch) <= 15 and
+            abs(roll)  <= 10
+        )
+
+    # -------------------------------
+    # RIGHT PROFILE CAPTURE
+    # -------------------------------
+    elif mode == "RIGHT_PROFILE":
+        return (
+            30 <= yaw <= 60 and     # face turned RIGHT
+            abs(pitch) <= 15 and
+            abs(roll)  <= 10
+        )
+
+    # -------------------------------
+    # UNKNOWN MODE (fail safe)
+    # -------------------------------
+    return False

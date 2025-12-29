@@ -1,22 +1,15 @@
 """
 quality_gatekeeper.py
 
-LAYER 3A: Quality Gatekeeper (Per-Frame)
+LAYER 3A: Quality Gatekeeper (MODE-AWARE)
 ---------------------------------------
 Purpose:
 - Ensure a single frame is Prakriti-ready
 
-Checks:
-1. Metric distance (iris-based)
-2. Face centering
-3. Blur detection
-4. Lighting symmetry (cheeks)
-5. Neutral expression (dynamic + smoothed)
-
-Returns:
-- quality_ok (bool)
-- message (UI guidance)
-- diagnostic metrics
+Supports:
+- FRONTAL
+- LEFT_PROFILE
+- RIGHT_PROFILE
 """
 
 import cv2
@@ -24,34 +17,29 @@ import numpy as np
 from collections import deque
 
 # -------------------------------------------------
-# Constants & thresholds (REAL-WORLD SAFE)
+# Constants (REAL-WORLD SAFE)
 # -------------------------------------------------
 
 IRIS_DIAMETER_MM = 11.7
 DIST_MIN_CM = 40
 DIST_MAX_CM = 60
 
-BLUR_THRESHOLD = 20            # rural-safe
-LIGHTING_DIFF_THRESHOLD = 50   # non-studio
-
+BLUR_THRESHOLD = 20
+LIGHTING_DIFF_THRESHOLD = 50
 CENTER_TOLERANCE = 0.15
 
-# Expression tolerance
-EXPR_DELTA_TOLERANCE = 0.08    # baseline + delta
-EXPR_VARIANCE_LIMIT = 0.005   # jitter guard
-
-# Rolling buffer
+# Expression logic
+EXPR_DELTA_TOLERANCE = 0.08
+EXPR_VARIANCE_LIMIT = 0.005
 EXPR_BUFFER_SIZE = 5
 
-# Cheek landmarks
+# Landmarks
 LEFT_CHEEK = [123, 116]
 RIGHT_CHEEK = [423, 345]
-
-# Iris landmarks (single eye)
 LEFT_IRIS = [474, 475, 476, 477]
 
 # -------------------------------------------------
-# Expression buffer (GLOBAL, intentional)
+# Rolling expression buffer (INTENTIONAL GLOBAL)
 # -------------------------------------------------
 
 _expression_buffer = deque(maxlen=EXPR_BUFFER_SIZE)
@@ -67,28 +55,21 @@ def estimate_distance_cm(landmarks, frame_w):
     if iris_px <= 1:
         return None
 
-    distance_cm = (IRIS_DIAMETER_MM * frame_w) / iris_px / 10
-    return round(distance_cm, 1)
+    return round((IRIS_DIAMETER_MM * frame_w) / iris_px / 10, 1)
 
 
 def compute_blur_score(gray):
     return cv2.Laplacian(gray, cv2.CV_64F).var()
 
 
-def compute_lighting_symmetry(gray, landmarks, w, h):
-    def cheek_mean(indices):
-        vals = []
-        for idx in indices:
-            x = int(landmarks[idx].x * w)
-            y = int(landmarks[idx].y * h)
-            if 0 <= x < w and 0 <= y < h:
-                vals.append(gray[y, x])
-        return np.mean(vals) if vals else 0
-
-    return abs(
-        cheek_mean(LEFT_CHEEK) -
-        cheek_mean(RIGHT_CHEEK)
-    )
+def compute_cheek_brightness(gray, landmarks, indices, w, h):
+    vals = []
+    for idx in indices:
+        x = int(landmarks[idx].x * w)
+        y = int(landmarks[idx].y * h)
+        if 0 <= x < w and 0 <= y < h:
+            vals.append(gray[y, x])
+    return np.mean(vals) if vals else 0
 
 
 def is_face_centered(landmarks):
@@ -99,26 +80,20 @@ def is_face_centered(landmarks):
         abs(np.mean(ys) - 0.5) <= CENTER_TOLERANCE
     )
 
-
 # -------------------------------------------------
-# Expression Logic (FIXED)
+# Expression Logic (Dynamic + Smoothed)
 # -------------------------------------------------
 
 def is_expression_neutral_dynamic(blendshapes, baseline):
-    """
-    Uses rolling variance + baseline delta.
-    """
     if not blendshapes:
         return True
 
     scores = {b.category_name: b.score for b in blendshapes}
     _expression_buffer.append(scores)
 
-    # Wait until buffer fills
     if len(_expression_buffer) < EXPR_BUFFER_SIZE:
         return True
 
-    # Track key expression channels
     keys = [
         "mouthSmileLeft", "mouthSmileRight",
         "eyeBlinkLeft", "eyeBlinkRight",
@@ -127,74 +102,79 @@ def is_expression_neutral_dynamic(blendshapes, baseline):
 
     for key in keys:
         values = [f.get(key, 0) for f in _expression_buffer]
-        variance = np.var(values)
-
-        # If expression is jittery → reject
-        if variance > EXPR_VARIANCE_LIMIT:
+        if np.var(values) > EXPR_VARIANCE_LIMIT:
             return False
 
-        # If baseline exists → check delta
         if baseline and key in baseline:
             if abs(values[-1] - baseline[key]) > EXPR_DELTA_TOLERANCE:
                 return False
 
     return True
 
-
 # -------------------------------------------------
-# Main Gatekeeper
+# MAIN QUALITY GATEKEEPER (MODE-AWARE)
 # -------------------------------------------------
 
-def check_frame_quality(frame_bgr, landmarks, blendshapes, baseline=None):
+def check_frame_quality(frame_bgr, landmarks, blendshapes, baseline=None, capture_mode="FRONTAL"):
     h, w, _ = frame_bgr.shape
     gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
 
     distance_cm = estimate_distance_cm(landmarks, w)
     blur_score = compute_blur_score(gray)
-    lighting_diff = compute_lighting_symmetry(gray, landmarks, w, h)
-    centered = is_face_centered(landmarks)
     expression_ok = is_expression_neutral_dynamic(blendshapes, baseline)
 
-    # -------- Priority-based guidance --------
-
+    # ---- Distance ----
     if distance_cm is None:
-        return _fail("Adjust distance", distance_cm, blur_score, lighting_diff, centered, expression_ok)
+        return _fail("Adjust distance", distance_cm, blur_score)
 
     if distance_cm < DIST_MIN_CM:
-        return _fail("Move back", distance_cm, blur_score, lighting_diff, centered, expression_ok)
+        return _fail("Move back", distance_cm, blur_score)
 
     if distance_cm > DIST_MAX_CM:
-        return _fail("Move closer", distance_cm, blur_score, lighting_diff, centered, expression_ok)
+        return _fail("Move closer", distance_cm, blur_score)
 
-    if not centered:
-        return _fail("Center your face", distance_cm, blur_score, lighting_diff, centered, expression_ok)
-
+    # ---- Blur ----
     if blur_score < BLUR_THRESHOLD:
-        return _fail("Hold still", distance_cm, blur_score, lighting_diff, centered, expression_ok)
+        return _fail("Hold still", distance_cm, blur_score)
 
-    if lighting_diff > LIGHTING_DIFF_THRESHOLD:
-        return _fail("Fix lighting", distance_cm, blur_score, lighting_diff, centered, expression_ok)
+    # ---- Mode-specific checks ----
+    if capture_mode == "FRONTAL":
+        if not is_face_centered(landmarks):
+            return _fail("Center your face", distance_cm, blur_score)
 
+        left = compute_cheek_brightness(gray, landmarks, LEFT_CHEEK, w, h)
+        right = compute_cheek_brightness(gray, landmarks, RIGHT_CHEEK, w, h)
+        if abs(left - right) > LIGHTING_DIFF_THRESHOLD:
+            return _fail("Fix lighting", distance_cm, blur_score)
+
+    elif capture_mode == "LEFT_PROFILE":
+        left = compute_cheek_brightness(gray, landmarks, LEFT_CHEEK, w, h)
+        if left == 0:
+            return _fail("Improve lighting (left side)", distance_cm, blur_score)
+
+    elif capture_mode == "RIGHT_PROFILE":
+        right = compute_cheek_brightness(gray, landmarks, RIGHT_CHEEK, w, h)
+        if right == 0:
+            return _fail("Improve lighting (right side)", distance_cm, blur_score)
+
+    # ---- Expression ----
     if not expression_ok:
-        return _fail("Keep neutral expression", distance_cm, blur_score, lighting_diff, centered, expression_ok)
+        return _fail("Keep neutral expression", distance_cm, blur_score)
 
+    # ---- PASS ----
     return {
         "quality_ok": True,
         "message": "Quality OK",
         "distance_cm": distance_cm,
         "blur_score": blur_score,
-        "lighting_status": "OK",
         "expression_status": "Stable"
     }
 
 
-def _fail(msg, dist, blur, light, centered, expr):
+def _fail(msg, dist, blur):
     return {
         "quality_ok": False,
         "message": msg,
         "distance_cm": dist,
-        "blur_score": blur,
-        "lighting_status": "Uneven" if light > LIGHTING_DIFF_THRESHOLD else "OK",
-        "expression_status": "Unstable" if not expr else "OK",
-        "centered": centered
+        "blur_score": blur
     }
