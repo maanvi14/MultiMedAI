@@ -13,6 +13,20 @@ from pose_gatekeeper import estimate_head_pose_from_matrix, is_pose_valid
 from quality_gatekeeper import check_frame_quality
 from stability_gatekeeper import StabilityGatekeeper
 
+# =========================
+# SESSION INITIALIZATION
+# =========================
+SESSION_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+BASE_SESSION_DIR = os.path.join("golden_meshes", f"session_{SESSION_ID}")
+MESH_DIR = os.path.join(BASE_SESSION_DIR, "meshes")
+IMAGE_DIR = os.path.join(BASE_SESSION_DIR, "images")
+
+os.makedirs(MESH_DIR, exist_ok=True)
+os.makedirs(IMAGE_DIR, exist_ok=True)
+
+print(f"🟢 Session started: session_{SESSION_ID}")
+
 # -------------------------------------------------
 # Capture Modes
 # -------------------------------------------------
@@ -58,31 +72,48 @@ options = vision.FaceLandmarkerOptions(
 # Helpers
 # -------------------------------------------------
 
+# def save_golden_mesh(data, mode):
+#     base = os.path.join("captured", getattr(globals(), 'participant_id', 'unknown'))
+#     dirpath = os.path.join(base, "golden_meshes")
+#     os.makedirs(dirpath, exist_ok=True)
+#     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+#     path = os.path.join(dirpath, f"golden_mesh_{mode}_{ts}.json")
+#     with open(path, "w") as f:
+#         json.dump(data, f, indent=2)
+#     return path
+
 def save_golden_mesh(data, mode):
-    # save into per-participant folder if participant_id is present
-    base = os.path.join("captured", getattr(globals(), 'participant_id', 'unknown'))
-    dirpath = os.path.join(base, "golden_meshes")
-    os.makedirs(dirpath, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = os.path.join(dirpath, f"golden_mesh_{mode}_{ts}.json")
+    path = os.path.join(MESH_DIR, f"{mode}.json")
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
+    print(f"✅ Mesh saved: {path}")
     return path
 
+# def save_face_image(frame, mode):
+#     base = os.path.join("captured", getattr(globals(), 'participant_id', 'unknown'))
+#     dirpath = os.path.join(base, "images")
+#     os.makedirs(dirpath, exist_ok=True)
+#     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+#     path = os.path.join(dirpath, f"{mode}_{ts}.jpg")
+#     cv2.imwrite(path, frame)
+#     return path
+
 def save_face_image(frame, mode):
-    base = os.path.join("captured", getattr(globals(), 'participant_id', 'unknown'))
-    dirpath = os.path.join(base, "images")
-    os.makedirs(dirpath, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = os.path.join(dirpath, f"{mode}_{ts}.jpg")
+    path = os.path.join(IMAGE_DIR, f"{mode}.jpg")
     cv2.imwrite(path, frame)
+    print(f"📸 Image saved: {path}")
     return path
 
 def draw_face_box(frame, landmarks, color, w, h, pad=20):
     xs = [lm.x * w for lm in landmarks]
     ys = [lm.y * h for lm in landmarks]
-    x1, y1 = int(max(min(xs)-pad,0)), int(max(min(ys)-pad,0))
-    x2, y2 = int(min(max(xs)+pad,w)), int(min(max(ys)+pad,h))
+    
+    face_height = max(ys) - min(ys)
+    
+    x1 = int(max(min(xs)-pad,0))
+    y1 = int(max(min(ys)-(face_height * 0.4),0)) 
+    x2 = int(min(max(xs)+pad,w))
+    y2 = int(min(max(ys)+pad,h))
     cv2.rectangle(frame, (x1,y1), (x2,y2), color, 3)
 
 def mode_instruction(mode):
@@ -91,6 +122,33 @@ def mode_instruction(mode):
         "LEFT_PROFILE": "Turn face LEFT",
         "RIGHT_PROFILE": "Turn face RIGHT"
     }[mode]
+
+# -------------------------------------------------
+# NEW: Virtual Forehead Logic (Grid Coverage)
+# -------------------------------------------------
+
+def draw_extended_green_mesh(frame, landmarks, w, h):
+    """Draws standard mesh + a dense grid covering the upper forehead."""
+    # 1. Draw original 468 points
+    for lm in landmarks:
+        cx, cy = int(lm.x*w), int(lm.y*h)
+        cv2.circle(frame, (cx,cy), 1, (0,255,0), -1)
+
+    # 2. Project Virtual Forehead Grid (3D-to-2D Mapping)
+    p10 = np.array([landmarks[10].x, landmarks[10].y])
+    p168 = np.array([landmarks[168].x, landmarks[168].y])
+    vec = p10 - p168
+
+    top_edge_indices = [103, 67, 109, 10, 338, 297, 332]
+    
+    for row_scale in [0.2, 0.4, 0.6, 0.8]:
+        for idx in top_edge_indices:
+            base = landmarks[idx]
+            vx = int((base.x + vec[0] * row_scale) * w)
+            vy = int((base.y + vec[1] * row_scale) * h)
+            
+            if 0 <= vx < w and 0 <= vy < h:
+                cv2.circle(frame, (vx, vy), 1, (0, 255, 0), -1)
 
 # -------------------------------------------------
 # Camera
@@ -144,7 +202,6 @@ def _load_or_create_device_participant_id(path='device_participant_id.txt'):
     except Exception:
         return 'device-' + str(uuid.uuid4())
 
-# device-local persistent participant id (auto-generated)
 participant_id = _load_or_create_device_participant_id()
 
 CONSENT_TEXT = (
@@ -157,6 +214,8 @@ CONSENT_TEXT = (
 # Main Loop
 # -------------------------------------------------
 
+
+
 with vision.FaceLandmarker.create_from_options(options) as landmarker:
 
     while cap.isOpened():
@@ -167,7 +226,6 @@ with vision.FaceLandmarker.create_from_options(options) as landmarker:
         frame = cv2.flip(frame, 1)
         h, w, _ = frame.shape
 
-        # If consent not yet given, show overlay and wait for user action
         if consent_token is None:
             overlay = show_consent_overlay(frame)
             cv2.imshow(WINDOW, overlay)
@@ -182,10 +240,7 @@ with vision.FaceLandmarker.create_from_options(options) as landmarker:
                     consent_token = token
                     consent_record = rec
                     print(f"Consent saved: {path}")
-                else:
-                    print("Failed to verify consent token after creation.")
             elif key == ord('d'):
-                print("Consent declined. Exiting.")
                 break
             continue
 
@@ -196,12 +251,8 @@ with vision.FaceLandmarker.create_from_options(options) as landmarker:
         status_text = f"{current_capture_mode}: {mode_instruction(current_capture_mode)}"
         box_color = (0,0,255)
 
-        # ---------- SAFE Capture Confirmation ----------
-        if (
-            last_capture_time is not None and
-            last_captured_mode is not None and
-            ts_ms - last_capture_time < CAPTURE_DISPLAY_MS
-        ):
+        if (last_capture_time is not None and last_captured_mode is not None and 
+            ts_ms - last_capture_time < CAPTURE_DISPLAY_MS):
             status_text = f"✓ {last_captured_mode} CAPTURED"
             box_color = (0,255,0)
 
@@ -209,30 +260,21 @@ with vision.FaceLandmarker.create_from_options(options) as landmarker:
             face = result.face_landmarks[0]
             landmarks_3d = np.array([[lm.x,lm.y,lm.z] for lm in face])
 
-            # ---------- Pose ----------
             transform = result.facial_transformation_matrixes[0]
             pose = estimate_head_pose_from_matrix(transform)
-            pose_result = is_pose_valid(pose, mode=current_capture_mode) if pose else {"valid": False, "reason": "No pose detected", "metrics": {}}
+            pose_result = is_pose_valid(pose, mode=current_capture_mode) if pose else {"valid": False}
             pose_ok = pose_result.get("valid", False)
 
-            # ---------- Quality ----------
-            quality = check_frame_quality(
-                frame,
-                face,
-                result.face_blendshapes[0] if result.face_blendshapes else [],
-                baseline_expression,
-                capture_mode=current_capture_mode
-            )
+            quality = check_frame_quality(frame, face, result.face_blendshapes[0] if result.face_blendshapes else [], baseline_expression, current_capture_mode)
             quality_ok = quality["quality_ok"]
 
-            # ---------- Stability ----------
             if pose_ok and quality_ok:
                 ready = stability.update(True, True, landmarks_3d)
             else:
                 ready = False
                 stability.reset()
 
-            # ---------- Capture ----------
+            # ---------- Capture with Mentor Mapping Proof ----------
             if ready and current_capture_mode not in golden_meshes:
                 golden_meshes[current_capture_mode] = {
                     "mode": current_capture_mode,
@@ -242,13 +284,23 @@ with vision.FaceLandmarker.create_from_options(options) as landmarker:
                     "metrics": quality
                 }
 
+                # Save raw clean image
+                raw_img_path = save_face_image(frame, f"{current_capture_mode}_RAW")
+
+                # Project 3D landmarks onto a copy for mentor's mapping/segmentation proof
+                mapping_proof = frame.copy()
+                draw_extended_green_mesh(mapping_proof, face, w, h)
+                mapped_img_path = save_face_image(mapping_proof, f"{current_capture_mode}_MAPPED")
+
                 mesh_path = save_golden_mesh(golden_meshes[current_capture_mode], current_capture_mode)
-                img_path = save_face_image(frame, current_capture_mode)
-                golden_meshes[current_capture_mode]["saved_files"] = {"mesh": mesh_path, "image": img_path}
+                golden_meshes[current_capture_mode]["saved_files"] = {
+                    "mesh": mesh_path, 
+                    "image_raw": raw_img_path, 
+                    "image_mapped": mapped_img_path
+                }
 
                 last_capture_time = ts_ms
                 last_captured_mode = current_capture_mode
-
                 current_capture_index += 1
                 stability.reset()
 
@@ -260,36 +312,20 @@ with vision.FaceLandmarker.create_from_options(options) as landmarker:
 
             elif not pose_ok:
                 status_text = pose_result.get("reason", mode_instruction(current_capture_mode))
-
             elif not quality_ok:
                 status_text = quality["message"]
-
             elif not ready:
                 status_text = "Hold still..."
                 box_color = (0,255,255)
 
-            # ---------- GREEN MESH ----------
-            for lm in face:
-                cx, cy = int(lm.x*w), int(lm.y*h)
-                cv2.circle(frame, (cx,cy), 1, (0,255,0), -1)
-
+            # Draw extended green mesh for live guidance
+            draw_extended_green_mesh(frame, face, w, h)
             draw_face_box(frame, face, box_color, w, h)
 
-            # ---------- Distance ----------
             if quality.get("distance_cm"):
-                cv2.putText(
-                    frame,
-                    f"Distance: {quality['distance_cm']} cm",
-                    (40, h-80),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.8,
-                    (255,255,255),
-                    2
-                )
+                cv2.putText(frame, f"Distance: {quality['distance_cm']} cm", (40, h-80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
 
-        cv2.putText(frame, status_text, (40,60),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, box_color, 3)
-
+        cv2.putText(frame, status_text, (40,60), cv2.FONT_HERSHEY_SIMPLEX, 1.2, box_color, 3)
         cv2.imshow(WINDOW, frame)
 
         if cv2.waitKey(5) & 0xFF == 27:

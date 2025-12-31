@@ -178,3 +178,4 @@ def _fail(msg, dist, blur):
         "distance_cm": dist,
         "blur_score": blur
     }
+
