@@ -170,13 +170,19 @@ while cap.isOpened():
         )
 
         # 🔹 Live hand index calculation
+       # 🔹 Live hand index (always allowed)
         try:
             live_hand_index = compute_hand_index(lm, w, h)
-            live_prakriti = classify_prakriti(live_hand_index, "right")
         except Exception:
             live_hand_index = None
+
+        # 🔹 Prakriti ONLY when stable
+        if stable and live_hand_index is not None:
+            live_prakriti = classify_prakriti(live_hand_index, "right")
+        else:
             live_prakriti = None
 
+        # 🔹 Capture when stable
         if stable and not captured:
             hi = live_hand_index
             prakriti = live_prakriti
