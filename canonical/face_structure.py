@@ -1,6 +1,4 @@
-"""
-Face Structure Feature Extraction (Canonical 2D ONLY)
-Ayurveda-aligned, scale-safe
+"""Face Structure Feature Extraction (Canonical 2D ONLY)
 """
 
 import json
