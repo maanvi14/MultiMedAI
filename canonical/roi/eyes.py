@@ -1,14 +1,18 @@
-# canonical/roi/eyes.py
 """
-Canonical ROI extraction — EYES feature (FRONTAL)
+Eye ROI extraction (MODEL-COMPATIBLE)
+
+Outputs:
+- left_eye.jpg
+- right_eye.jpg
+- both_eyes_eyebrows.jpg
 
 Uses:
-- canonical/FRONTAL.json → canonical_2d
-- meshes/FRONTAL.json    → original image space
+- MediaPipe Face Mesh landmarks
+- RGB rectangular crops (NO polygon mask)
 """
 
-import json
 import os
+import json
 import cv2
 import numpy as np
 
@@ -33,133 +37,91 @@ RIGHT_EYEBROW = [336, 296, 334, 293, 300]
 # Loaders
 # -------------------------------------------------
 
-def load_canonical(session_dir):
-    path = os.path.join(session_dir, "canonical", "FRONTAL.json")
-
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Missing canonical file: {path}")
-
-    with open(path, "r") as f:
-        data = json.load(f)
-
-    if "canonical_2d" not in data:
-        raise KeyError("canonical_2d missing in FRONTAL.json")
-
-    canonical = np.array(data["canonical_2d"], dtype=np.float32)
-
-    assert canonical.shape[1] == 2, "Canonical landmarks must be 2D"
-    return canonical
-
-
-def load_mesh_landmarks(session_dir):
+def load_mesh(session_dir):
     path = os.path.join(session_dir, "meshes", "FRONTAL.json")
-
     with open(path, "r") as f:
         data = json.load(f)
-
     return np.array(data["mesh_3d"], dtype=np.float32)
 
-
 def load_image(session_dir):
-    path = os.path.join(session_dir, "images", "FRONTAL_RAW.jpg")
-    img = cv2.imread(path)
-
+    img_path = os.path.join(session_dir, "images", "FRONTAL_RAW.jpg")
+    img = cv2.imread(img_path)
     if img is None:
         raise RuntimeError("FRONTAL_RAW.jpg not found")
-
     return img
 
-
 # -------------------------------------------------
-# Canonical → Image mapping
+# Landmark → Pixel conversion
 # -------------------------------------------------
 
-def canonical_to_pixel(canonical_pts, mesh_3d, img_shape):
-    """
-    Maps canonical landmarks back into image space
-    using original face bounding box.
-    """
-
+def mesh_to_pixel(mesh, img_shape):
     h, w = img_shape[:2]
-
-    xs = mesh_3d[:, 0] * w
-    ys = mesh_3d[:, 1] * h
-
-    min_x, max_x = xs.min(), xs.max()
-    min_y, max_y = ys.min(), ys.max()
-
-    face_w = max_x - min_x
-    face_h = max_y - min_y
-
-    # Normalize canonical space
-    cmin = canonical_pts.min(axis=0)
-    cmax = canonical_pts.max(axis=0)
-    norm = (canonical_pts - cmin) / (cmax - cmin + 1e-6)
-
-    px = min_x + norm[:, 0] * face_w
-    py = min_y + norm[:, 1] * face_h
-
-    return np.stack([px, py], axis=1).astype(np.int32)
-
+    px = np.zeros((mesh.shape[0], 2), dtype=np.int32)
+    px[:, 0] = (mesh[:, 0] * w).astype(int)
+    px[:, 1] = (mesh[:, 1] * h).astype(int)
+    return px
 
 # -------------------------------------------------
-# ROI helpers
+# Bounding box helper
 # -------------------------------------------------
 
-def bbox_from_indices(points, indices, pad=12, down_bias=0.35):
+def bbox(points, indices, pad=10):
     xs = points[indices, 0]
     ys = points[indices, 1]
 
-    h = ys.max() - ys.min()
-    extra_down = int(h * down_bias)
+    x1 = max(xs.min() - pad, 0)
+    y1 = max(ys.min() - pad, 0)
+    x2 = xs.max() + pad
+    y2 = ys.max() + pad
 
-    x1 = max(int(xs.min() - pad), 0)
-    y1 = max(int(ys.min() - pad), 0)
-    x2 = int(xs.max() + pad)
-    y2 = int(ys.max() + pad + extra_down)
-
-    return x1, y1, x2, y2
+    return int(x1), int(y1), int(x2), int(y2)
 
 # -------------------------------------------------
 # MAIN
 # -------------------------------------------------
 
 def extract_eye_rois(session_dir):
+    print("👁 Extracting MODEL-COMPATIBLE eye ROIs...")
 
-    canonical = load_canonical(session_dir)
-    mesh_3d = load_mesh_landmarks(session_dir)
-    image = load_image(session_dir)
-
-    pixel_pts = canonical_to_pixel(canonical, mesh_3d, image.shape)
+    img = load_image(session_dir)
+    mesh = load_mesh(session_dir)
+    pts = mesh_to_pixel(mesh, img.shape)
 
     out_dir = os.path.join(session_dir, "analysis", "eyes")
     os.makedirs(out_dir, exist_ok=True)
 
+    # -------------------------
     # LEFT EYE
-    x1, y1, x2, y2 = bbox_from_indices(pixel_pts, LEFT_EYE)
-    cv2.imwrite(os.path.join(out_dir, "left_eye.jpg"), image[y1:y2, x1:x2])
+    # -------------------------
+    x1, y1, x2, y2 = bbox(pts, LEFT_EYE, pad=12)
+    left_eye = img[y1:y2, x1:x2]
+    cv2.imwrite(os.path.join(out_dir, "left_eye.jpg"), left_eye)
 
+    # -------------------------
     # RIGHT EYE
-    x1, y1, x2, y2 = bbox_from_indices(pixel_pts, RIGHT_EYE)
-    cv2.imwrite(os.path.join(out_dir, "right_eye.jpg"), image[y1:y2, x1:x2])
+    # -------------------------
+    x1, y1, x2, y2 = bbox(pts, RIGHT_EYE, pad=12)
+    right_eye = img[y1:y2, x1:x2]
+    cv2.imwrite(os.path.join(out_dir, "right_eye.jpg"), right_eye)
 
+    # -------------------------
     # BOTH EYES + EYEBROWS
+    # -------------------------
     combined = LEFT_EYE + RIGHT_EYE + LEFT_EYEBROW + RIGHT_EYEBROW
-    x1, y1, x2, y2 = bbox_from_indices(pixel_pts, combined, pad=20)
-    cv2.imwrite(
-        os.path.join(out_dir, "both_eyes_eyebrows.jpg"),
-        image[y1:y2, x1:x2]
-    )
+    x1, y1, x2, y2 = bbox(pts, combined, pad=18)
+    both = img[y1:y2, x1:x2]
+    cv2.imwrite(os.path.join(out_dir, "both_eyes_eyebrows.jpg"), both)
 
-    print("✅ Eyes ROIs extracted correctly")
+    print("✅ Eye ROIs saved (RGB, model-ready)")
 
+# -------------------------------------------------
+# CLI
+# -------------------------------------------------
 
 if __name__ == "__main__":
     import sys
-
     if len(sys.argv) < 2:
         print("Usage: python -m canonical.roi.eyes <SESSION_DIR>")
         sys.exit(1)
 
     extract_eye_rois(sys.argv[1])
-

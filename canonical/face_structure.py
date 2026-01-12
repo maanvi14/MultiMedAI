@@ -77,4 +77,3 @@ def extract_face_structure(session_dir):
     (visual/debug only, not used in features)
     """
     print("ℹ Face structure image extraction skipped (features-only pipeline)")
-

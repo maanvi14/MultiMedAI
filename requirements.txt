@@ -3,3 +3,9 @@ mediapipe
 numpy
 scipy
 pandas
+torch
+torchvision
+albumentations
+scikit-learn
+tqdm
+matplotlib

@@ -1,3 +1,6 @@
 {
-    "python-envs.pythonProjects": []
+    "python-envs.pythonProjects": [],
+    "python.analysis.extraPaths": [
+        "./feature_extractors"
+    ]
 }

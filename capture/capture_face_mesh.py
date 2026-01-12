@@ -7,12 +7,23 @@ import json, os
 from datetime import datetime
 import uuid
 import subprocess
+from utils.face_mesh_connections import (
+    FACEMESH_TESSELATION,
+    FACEMESH_FACE_OVAL,
+    FACEMESH_LEFT_EYE,
+    FACEMESH_RIGHT_EYE,
+    FACEMESH_LIPS,
+    FACEMESH_NOSE
+)
+
 
 from consent import create_consent, persist_consent, verify_consent_token
 
 from quality.pose_gatekeeper import estimate_head_pose_from_matrix, is_pose_valid
 from quality.quality_gatekeeper import check_frame_quality
 from quality.stability_gatekeeper import StabilityGatekeeper
+
+RENDER_DEBUG = False
 
 # =========================
 # SESSION INITIALIZATION
@@ -108,17 +119,18 @@ def save_face_image(frame, mode):
     print(f"📸 Image saved: {path}")
     return path
 
-def draw_face_box(frame, landmarks, color, w, h, pad=20):
+def draw_face_box(overlay, landmarks, color, w, h, pad=20):
     xs = [lm.x * w for lm in landmarks]
     ys = [lm.y * h for lm in landmarks]
-    
     face_height = max(ys) - min(ys)
-    
+
     x1 = int(max(min(xs)-pad,0))
-    y1 = int(max(min(ys)-(face_height * 0.4),0)) 
+    y1 = int(max(min(ys)-(face_height * 0.4),0))
     x2 = int(min(max(xs)+pad,w))
     y2 = int(min(max(ys)+pad,h))
-    cv2.rectangle(frame, (x1,y1), (x2,y2), color, 3)
+
+    cv2.rectangle(overlay, (x1,y1), (x2,y2), color, 3)
+
 
 def mode_instruction(mode):
     return {
@@ -130,29 +142,94 @@ def mode_instruction(mode):
 # -------------------------------------------------
 # NEW: Virtual Forehead Logic (Grid Coverage)
 # -------------------------------------------------
+def draw_extended_green_mesh(overlay, landmarks, w, h):
+    """Sparse virtual forehead points only"""
 
-def draw_extended_green_mesh(frame, landmarks, w, h):
-    """Draws standard mesh + a dense grid covering the upper forehead."""
-    # 1. Draw original 468 points
-    for lm in landmarks:
-        cx, cy = int(lm.x*w), int(lm.y*h)
-        cv2.circle(frame, (cx,cy), 1, (0,255,0), -1)
-
-    # 2. Project Virtual Forehead Grid (3D-to-2D Mapping)
     p10 = np.array([landmarks[10].x, landmarks[10].y])
     p168 = np.array([landmarks[168].x, landmarks[168].y])
     vec = p10 - p168
 
     top_edge_indices = [103, 67, 109, 10, 338, 297, 332]
-    
-    for row_scale in [0.2, 0.4, 0.6, 0.8]:
+
+    for row_scale in [0.3, 0.6, 0.9]:
         for idx in top_edge_indices:
             base = landmarks[idx]
             vx = int((base.x + vec[0] * row_scale) * w)
             vy = int((base.y + vec[1] * row_scale) * h)
-            
             if 0 <= vx < w and 0 <= vy < h:
-                cv2.circle(frame, (vx, vy), 1, (0, 255, 0), -1)
+                cv2.circle(overlay, (vx, vy), 1, COLOR_FOREHEAD, -1)
+
+
+# =========================
+# UI VISUAL CONSTANTS (FINAL)
+# =========================
+COLOR_MESH = (190, 190, 190)        # soft neutral white
+
+COLOR_FACE_OVAL = (90, 210, 210)    # cyan (ONLY outer boundary)
+COLOR_LEFT_EYE  = (70, 120, 220)    # blue
+COLOR_RIGHT_EYE = (190, 110, 200)   # magenta
+COLOR_LIPS      = (90, 210, 210)    # cyan
+COLOR_NOSE      = (120, 180, 180)   # muted teal (NOT yellow)
+COLOR_FOREHEAD  = (0, 180, 0)       # muted green
+
+ALPHA_OVERLAY = 0.35
+
+
+def draw_full_facemesh_overlay(overlay, landmarks, w, h):
+    """Draw mesh and semantic regions onto overlay ONLY"""
+
+    # Tessellation (background)
+    for i, j in FACEMESH_TESSELATION:
+        p1, p2 = landmarks[i], landmarks[j]
+        cv2.line(
+            overlay,
+            (int(p1.x * w), int(p1.y * h)),
+            (int(p2.x * w), int(p2.y * h)),
+            COLOR_MESH,
+            1,
+            cv2.LINE_AA
+        )
+
+    # Face oval
+    for i, j in FACEMESH_FACE_OVAL:
+        p1, p2 = landmarks[i], landmarks[j]
+        cv2.line(overlay,
+                 (int(p1.x * w), int(p1.y * h)),
+                 (int(p2.x * w), int(p2.y * h)),
+                 COLOR_FACE_OVAL, 2, cv2.LINE_AA)
+
+    # Left eye
+    for i, j in FACEMESH_LEFT_EYE:
+        p1, p2 = landmarks[i], landmarks[j]
+        cv2.line(overlay,
+                 (int(p1.x * w), int(p1.y * h)),
+                 (int(p2.x * w), int(p2.y * h)),
+                 COLOR_LEFT_EYE, 2, cv2.LINE_AA)
+
+    # Right eye
+    for i, j in FACEMESH_RIGHT_EYE:
+        p1, p2 = landmarks[i], landmarks[j]
+        cv2.line(overlay,
+                 (int(p1.x * w), int(p1.y * h)),
+                 (int(p2.x * w), int(p2.y * h)),
+                 COLOR_RIGHT_EYE, 2, cv2.LINE_AA)
+
+    # Lips
+    for i, j in FACEMESH_LIPS:
+        p1, p2 = landmarks[i], landmarks[j]
+        cv2.line(overlay,
+                 (int(p1.x * w), int(p1.y * h)),
+                 (int(p2.x * w), int(p2.y * h)),
+                 COLOR_LIPS, 2, cv2.LINE_AA)
+
+    # Nose
+    for i, j in FACEMESH_NOSE:
+        p1, p2 = landmarks[i], landmarks[j]
+        cv2.line(overlay,
+                 (int(p1.x * w), int(p1.y * h)),
+                 (int(p2.x * w), int(p2.y * h)),
+                 COLOR_NOSE, 2, cv2.LINE_AA)
+
 def run_auto_pipeline():
     cap.release()
     cv2.destroyAllWindows()
@@ -328,7 +405,10 @@ with vision.FaceLandmarker.create_from_options(options) as landmarker:
 
                 # Project 3D landmarks onto a copy for mentor's mapping/segmentation proof
                 mapping_proof = frame.copy()
+                draw_full_facemesh_overlay(mapping_proof, face, w, h)
                 draw_extended_green_mesh(mapping_proof, face, w, h)
+
+
                 mapped_img_path = save_face_image(mapping_proof, f"{current_capture_mode}_MAPPED")
 
                 mesh_path = save_golden_mesh(golden_meshes[current_capture_mode], current_capture_mode)
@@ -356,10 +436,15 @@ with vision.FaceLandmarker.create_from_options(options) as landmarker:
             elif not ready:
                 status_text = "Hold still..."
                 box_color = (0,255,255)
+            
+            overlay = frame.copy()
 
-            # Draw extended green mesh for live guidance
-            draw_extended_green_mesh(frame, face, w, h)
-            draw_face_box(frame, face, box_color, w, h)
+            draw_full_facemesh_overlay(overlay, face, w, h)
+            draw_extended_green_mesh(overlay, face, w, h)
+            draw_face_box(overlay, face, box_color, w, h)
+
+            cv2.addWeighted(overlay, ALPHA_OVERLAY, frame, 1 - ALPHA_OVERLAY, 0, frame)
+
 
             if quality.get("distance_cm"):
                 cv2.putText(frame, f"Distance: {quality['distance_cm']} cm", (40, h-80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
@@ -372,3 +457,4 @@ with vision.FaceLandmarker.create_from_options(options) as landmarker:
 
 if __name__ == "__main__":
     run_auto_pipeline()
+    

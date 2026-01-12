@@ -62,11 +62,14 @@ def compute_lips_bbox(pts, img_shape):
     lip_h = y_max - y_min
     lip_w = x_max - x_min
 
-    x1 = x_min - int(0.35 * lip_w)
-    x2 = x_max + int(0.35 * lip_w)
+    # Horizontal: reduce side skin
+    x1 = x_min - int(0.20 * lip_w)
+    x2 = x_max + int(0.20 * lip_w)
 
-    y1 = y_min - int(0.45 * lip_h)
-    y2 = y_max + int(0.55 * lip_h)
+    # Vertical: reduce upper skin & chin bleed
+    y1 = y_min - int(0.25 * lip_h)
+    y2 = y_max + int(0.35 * lip_h)
+
 
     return (
         max(0, x1),

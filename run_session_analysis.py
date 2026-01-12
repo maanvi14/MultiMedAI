@@ -3,12 +3,13 @@ run_session_analysis.py
 =======================
 
 MASTER ANALYSIS ORCHESTRATOR
+---------------------------
+Runs the complete MultiMedAI session pipeline in a fixed, safe order:
 
-Runs:
-1. Canonical projection
-2. ROI extraction
-3. Feature building
-4. Prakriti mapping
+1. Canonical projection (pose & camera normalization)
+2. ROI extraction (eyes, nose, cheeks, lips, forehead)
+3. Feature building (geometry-based, explainable)
+4. Prakriti mapping (rule-based, doctor-assistive)
 """
 
 import os
@@ -37,6 +38,10 @@ from prakriti_mapping.run_prakriti import run_prakriti_analysis
 # -------------------------------------------------
 
 def validate_session(session_dir: str):
+    """
+    Ensures required inputs exist before analysis starts.
+    Prevents silent or partial failures.
+    """
     required = [
         "images/FRONTAL_RAW.jpg",
         "meshes/FRONTAL.json",
@@ -69,13 +74,18 @@ def run_analysis(
     print("==============================")
     print(f"📁 Session: {session_dir}\n")
 
+    # Validate session structure
     validate_session(session_dir)
 
-    # 1️⃣ CANONICAL PROJECTION (MANDATORY)
+    # -------------------------------------------------
+    # 1️⃣ Canonical Projection (MANDATORY)
+    # -------------------------------------------------
     print("▶ Canonical projection...")
     run_canonical_for_session(session_dir)
 
-    # 2️⃣ STRUCTURE & ROIs
+    # -------------------------------------------------
+    # 2️⃣ Structure & ROI Extraction
+    # -------------------------------------------------
     if run_face_structure:
         print("▶ Face structure...")
         extract_face_structure(session_dir)
@@ -108,11 +118,15 @@ def run_analysis(
         except Exception as e:
             print(f"⚠ Chin skipped: {e}")
 
-    # 3️⃣ FEATURE BUILDING
+    # -------------------------------------------------
+    # 3️⃣ Feature Building
+    # -------------------------------------------------
     print("▶ Building features...")
     build_features(session_dir)
 
-    # 4️⃣ PRAKRITI
+    # -------------------------------------------------
+    # 4️⃣ Prakriti Mapping
+    # -------------------------------------------------
     print("▶ Prakriti...")
     run_prakriti_analysis(session_dir)
 
@@ -122,7 +136,7 @@ def run_analysis(
 
 
 # -------------------------------------------------
-# CLI ENTRY
+# CLI ENTRY POINT
 # -------------------------------------------------
 
 if __name__ == "__main__":
