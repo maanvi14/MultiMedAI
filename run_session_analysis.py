@@ -7,9 +7,10 @@ MASTER ANALYSIS ORCHESTRATOR
 Runs the complete MultiMedAI session pipeline in a fixed, safe order:
 
 1. Canonical projection (pose & camera normalization)
-2. ROI extraction (eyes, nose, cheeks, lips, forehead)
+2. ROI extraction (eyes, nose, cheeks, lips, forehead, teeth)
 3. Feature building (geometry-based, explainable)
-4. Prakriti mapping (rule-based, doctor-assistive)
+4. Teeth ML Analysis (size + regularity)  ✅ NEW
+5. Prakriti mapping (rule-based, doctor-assistive)
 """
 
 import os
@@ -27,7 +28,10 @@ from canonical.roi.nose import extract_nose_rois
 from canonical.roi.cheeks import extract_cheek_rois
 from canonical.roi.lips import extract_lips_roi
 from canonical.roi.forehead import extract_forehead_roi
-# from canonical.roi.chin import extract_chin_roi  # optional
+
+# ✅ NEW: TEETH ROI + ML inference
+from canonical.roi.teeth import extract_teeth_roi
+from feature_extractors.teeth_features import extract_teeth_features
 
 from build_features import build_features
 from prakriti_mapping.run_prakriti import run_prakriti_analysis
@@ -68,6 +72,8 @@ def run_analysis(
     run_lips: bool = True,
     run_forehead: bool = True,
     run_chin: bool = False,
+    run_teeth: bool = True,       # ✅ NEW
+    run_teeth_ml: bool = True,    # ✅ NEW
 ):
     print("\n==============================")
     print("🔬 Starting Session Analysis")
@@ -118,11 +124,21 @@ def run_analysis(
         except Exception as e:
             print(f"⚠ Chin skipped: {e}")
 
+    # ✅ NEW: TEETH ROI
+    if run_teeth:
+        print("▶ Teeth ROI...")
+        extract_teeth_roi(session_dir)
+
     # -------------------------------------------------
     # 3️⃣ Feature Building
     # -------------------------------------------------
     print("▶ Building features...")
     build_features(session_dir)
+
+    # ✅ NEW: TEETH ML ANALYSIS (post ROI + post build_features is also fine)
+    if run_teeth_ml:
+        print("▶ Teeth ML analysis...")
+        extract_teeth_features(session_dir)
 
     # -------------------------------------------------
     # 4️⃣ Prakriti Mapping
@@ -159,7 +175,9 @@ if __name__ == "__main__":
         run_cheeks=True,
         run_lips=True,
         run_forehead=True,
-        run_chin=False
+        run_chin=False,
+        run_teeth=True,
+        run_teeth_ml=True
     )
 
     print("[DONE]")

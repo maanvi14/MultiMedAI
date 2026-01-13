@@ -1,97 +1,117 @@
 """
-Final Prakriti Runner
-====================
-Combines face structure (PRIMARY) + eye EAR (SUPPORTIVE)
-Produces explainable, doctor-assistive Prakriti output
+Final Prakriti Runner (EQUAL WEIGHT)
+===================================
+Combines:
+✅ Face Structure
+✅ Eyes (EAR based)
+✅ Teeth
+
+All features contribute with SAME WEIGHT (equal ensemble).
+
+Produces explainable, doctor-assistive Prakriti output.
 """
 
 import os
 import json
+import sys
 
 from prakriti_mapping.face_structure_mapping import map_face_structure_to_prakriti
 from prakriti_mapping.eye_mapping import map_eye_to_prakriti
+from prakriti_mapping.teeth_mapping import build_teeth_section
 
 
-# ----------------------------
-# Weights (explicit & tunable)
-# ----------------------------
-EYE_SUPPORT_WEIGHT = 0.3   # supportive only, never dominant
+def _init_scores():
+    return {"VATA": 0.0, "PITTA": 0.0, "KAPHA": 0.0}
+
+
+def _safe_normalize(scores: dict):
+    total = sum(scores.values()) + 1e-6
+    for k in scores:
+        scores[k] = round(scores[k] / total, 3)
+    return scores
 
 
 def run_prakriti_analysis(session_dir: str):
     features_path = os.path.join(session_dir, "analysis", "features.json")
 
     if not os.path.exists(features_path):
-        raise FileNotFoundError("features.json not found. Run build_features first.")
+        raise FileNotFoundError("❌ features.json not found. Run build_features first.")
 
     with open(features_path, "r") as f:
         data = json.load(f)
 
     # -------------------------------------------------
-    # Load features safely
+    # Load Features
     # -------------------------------------------------
     features = data.get("features", {})
-
     face_features = features.get("face_structure")
-    eye_features  = features.get("eyes")   # plural by design
+    eye_features = features.get("eyes")  # plural by design
 
     if not face_features:
-        raise ValueError(
-            "Face structure features missing. "
-            "Prakriti analysis requires face structure."
-        )
+        raise ValueError("❌ face_structure missing in features.json")
 
     # -------------------------------------------------
-    # 1️⃣ Primary mapping: Face Structure
+    # Collect module outputs
     # -------------------------------------------------
+    modules = []
+
+    # 1) Face
     face_result = map_face_structure_to_prakriti(face_features)
+    if face_result and "prakriti_scores" in face_result:
+        modules.append(("face_structure", face_result))
 
-    final_scores = face_result["prakriti_scores"].copy()
-    explanation  = face_result["explanation"].copy()
-
-    # -------------------------------------------------
-    # 2️⃣ Supportive mapping: Eyes (EAR-based)
-    # -------------------------------------------------
+    # 2) Eyes (optional)
     if eye_features:
         eye_result = map_eye_to_prakriti(eye_features)
-
         if eye_result and "prakriti_scores" in eye_result:
-            for dosha, val in eye_result["prakriti_scores"].items():
-                final_scores[dosha] += val * EYE_SUPPORT_WEIGHT
+            modules.append(("eyes", eye_result))
 
-        if eye_result and "explanation" in eye_result:
-            # single source of truth for eye explanation
-            explanation["eyes"] = eye_result["explanation"]
+    # 3) Teeth (optional)
+    teeth_result = build_teeth_section(session_dir)
+    if teeth_result and isinstance(teeth_result, dict) and "prakriti_scores" in teeth_result:
+        modules.append(("teeth", teeth_result))
 
-    # -------------------------------------------------
-    # 3️⃣ Normalize final scores
-    # -------------------------------------------------
-    total = sum(final_scores.values()) + 1e-6
-    for k in final_scores:
-        final_scores[k] = round(final_scores[k] / total, 3)
+    if len(modules) == 0:
+        raise RuntimeError("❌ No valid mapping modules produced prakriti_scores.")
 
     # -------------------------------------------------
-    # 4️⃣ Confidence estimation (agreement strength)
+    # Equal-weight fusion
+    # -------------------------------------------------
+    final_scores = _init_scores()
+    explanation = {}
+
+    module_count = len(modules)
+
+    for name, mod in modules:
+        # Merge scores equally
+        mod_scores = mod.get("prakriti_scores", {})
+        for dosha in final_scores.keys():
+            final_scores[dosha] += float(mod_scores.get(dosha, 0.0)) / module_count
+
+        # Store explanation per module
+        if "explanation" in mod:
+            explanation[name] = mod["explanation"]
+
+    # Normalize final scores
+    final_scores = _safe_normalize(final_scores)
+
+    # -------------------------------------------------
+    # Confidence = top1 - top2
     # -------------------------------------------------
     sorted_vals = sorted(final_scores.values(), reverse=True)
-    confidence = sorted_vals[0] - sorted_vals[1]
+    confidence = round(max(0.0, min(sorted_vals[0] - sorted_vals[1], 1.0)), 3)
 
-    # Clamp confidence for interpretability
-    confidence = round(max(0.0, min(confidence, 1.0)), 3)
+    dominant = max(final_scores, key=final_scores.get)
 
     # -------------------------------------------------
-    # Final output
+    # Final Output
     # -------------------------------------------------
     result = {
         "prakriti_scores": final_scores,
-        "dominant_prakriti": max(final_scores, key=final_scores.get).upper(),
+        "dominant_prakriti": dominant,
         "confidence": confidence,
+        "modules_used": [name for name, _ in modules],
         "explanation": explanation,
-        "note": (
-            "Face structure is the primary constitutional signal. "
-            "Eye EAR contributes supportive soft-tissue evidence only. "
-            "Results are assistive and must be interpreted by a clinician."
-        ),
     }
 
     # -------------------------------------------------
@@ -104,7 +124,21 @@ def run_prakriti_analysis(session_dir: str):
     with open(out_path, "w") as f:
         json.dump(result, f, indent=2)
 
-    print("🧘 Prakriti Analysis Complete")
-    print(f"Dominant Prakriti → {result['dominant_prakriti']}")
+    print("🧘 Prakriti Analysis Complete ✅")
+    print(f"Dominant Prakriti → {dominant}")
     print(f"Confidence → {confidence}")
+    print(f"Modules Used → {result['modules_used']}")
+    print(f"Saved → {out_path}")
 
+    return result
+
+
+# -------------------------------------------------
+# CLI ENTRY
+# -------------------------------------------------
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python -m prakriti_mapping.run_prakriti <SESSION_DIR>")
+        sys.exit(1)
+
+    run_prakriti_analysis(sys.argv[1])

@@ -46,7 +46,7 @@ print(f"🟢 Session started: session_{SESSION_ID}")
 # Capture Modes
 # -------------------------------------------------
 
-CAPTURE_SEQUENCE = ["FRONTAL", "LEFT_PROFILE", "RIGHT_PROFILE"]
+CAPTURE_SEQUENCE = ["FRONTAL", "TEETH_SMILE","TEETH_OPEN","LEFT_PROFILE", "RIGHT_PROFILE"]
 current_capture_index = 0
 current_capture_mode = CAPTURE_SEQUENCE[current_capture_index]
 
@@ -82,6 +82,22 @@ options = vision.FaceLandmarkerOptions(
     output_face_blendshapes=True,
     output_facial_transformation_matrixes=True
 )
+# -------------------------------------------------
+# Teeth capture thresholds (from Teeth project)
+# -------------------------------------------------
+TEETH_CLOSED_MAX = 0.30   # smile / closed-ish mouth
+TEETH_OPEN_MIN = 0.35     # open mouth
+
+# MediaPipe landmark indices
+TEETH_UPPER_LIP = 13
+TEETH_LOWER_LIP = 14
+TEETH_LEFT_MOUTH = 61
+TEETH_RIGHT_MOUTH = 291
+OUTER_LIPS = [
+    61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291,
+    375, 321, 405, 314, 17, 84, 181, 91, 146
+]
+
 
 # -------------------------------------------------
 # Helpers
@@ -134,10 +150,27 @@ def draw_face_box(overlay, landmarks, color, w, h, pad=20):
 
 def mode_instruction(mode):
     return {
-        "FRONTAL": "Face the camera",
+        "FRONTAL": "Face the camera (Neutral face)",
+        "TEETH_SMILE": "Smile naturally (show teeth)",
+        "TEETH_OPEN": "Open mouth gently (show teeth clearly)",
         "LEFT_PROFILE": "Turn face LEFT",
         "RIGHT_PROFILE": "Turn face RIGHT"
     }[mode]
+
+def compute_mouth_open_ratio(face, w, h):
+    """
+    Returns mouth opening ratio:
+    (upper-lower distance) / (mouth width)
+    """
+    upper = np.array([face[TEETH_UPPER_LIP].x * w, face[TEETH_UPPER_LIP].y * h])
+    lower = np.array([face[TEETH_LOWER_LIP].x * w, face[TEETH_LOWER_LIP].y * h])
+    left  = np.array([face[TEETH_LEFT_MOUTH].x * w, face[TEETH_LEFT_MOUTH].y * h])
+    right = np.array([face[TEETH_RIGHT_MOUTH].x * w, face[TEETH_RIGHT_MOUTH].y * h])
+
+    mouth_open = np.linalg.norm(upper - lower)
+    mouth_width = np.linalg.norm(left - right)
+
+    return mouth_open / (mouth_width + 1e-6)
 
 # -------------------------------------------------
 # NEW: Virtual Forehead Logic (Grid Coverage)
@@ -229,6 +262,29 @@ def draw_full_facemesh_overlay(overlay, landmarks, w, h):
                  (int(p1.x * w), int(p1.y * h)),
                  (int(p2.x * w), int(p2.y * h)),
                  COLOR_NOSE, 2, cv2.LINE_AA)
+        
+def draw_mouth_box(frame, face, w, h, color=(0, 255, 255), pad=25):
+    """
+    Bigger bounding box around full mouth area (TEETH modes).
+    Uses OUTER_LIPS points like the Teeth project.
+    """
+
+    lip_points = np.array(
+        [[int(face[i].x * w), int(face[i].y * h)] for i in OUTER_LIPS],
+        dtype=np.int32
+    )
+
+    x1, y1 = np.min(lip_points, axis=0)
+    x2, y2 = np.max(lip_points, axis=0)
+
+    # add padding
+    x1 = max(0, x1 - pad)
+    y1 = max(0, y1 - pad)
+    x2 = min(w, x2 + pad)
+    y2 = min(h, y2 + pad)
+
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+
 
 def run_auto_pipeline():
     cap.release()
@@ -329,9 +385,6 @@ CONSENT_TEXT = (
 # -------------------------------------------------
 # Main Loop
 # -------------------------------------------------
-
-
-
 with vision.FaceLandmarker.create_from_options(options) as landmarker:
 
     while cap.isOpened():
@@ -360,35 +413,76 @@ with vision.FaceLandmarker.create_from_options(options) as landmarker:
                 break
             continue
 
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame)
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+
         ts_ms = int(cv2.getTickCount()/cv2.getTickFrequency()*1000)
         result = landmarker.detect_for_video(mp_image, ts_ms)
 
         status_text = f"{current_capture_mode}: {mode_instruction(current_capture_mode)}"
-        box_color = (0,0,255)
+        box_color = (0, 0, 255)
 
-        if (last_capture_time is not None and last_captured_mode is not None and 
+        if (last_capture_time is not None and last_captured_mode is not None and
             ts_ms - last_capture_time < CAPTURE_DISPLAY_MS):
             status_text = f"✓ {last_captured_mode} CAPTURED"
-            box_color = (0,255,0)
+            box_color = (0, 255, 0)
 
         elif result.face_landmarks:
             face = result.face_landmarks[0]
-            landmarks_3d = np.array([[lm.x,lm.y,lm.z] for lm in face])
+            landmarks_3d = np.array([[lm.x, lm.y, lm.z] for lm in face])
 
             transform = result.facial_transformation_matrixes[0]
             pose = estimate_head_pose_from_matrix(transform)
-            pose_result = is_pose_valid(pose, mode=current_capture_mode) if pose else {"valid": False}
+
+            pose_mode = "FRONTAL" if current_capture_mode.startswith("TEETH") else current_capture_mode
+            pose_result = is_pose_valid(pose, mode=pose_mode) if pose else {"valid": False}
             pose_ok = pose_result.get("valid", False)
 
-            quality = check_frame_quality(frame, face, result.face_blendshapes[0] if result.face_blendshapes else [], baseline_expression, current_capture_mode)
+            quality = check_frame_quality(
+                frame,
+                face,
+                result.face_blendshapes[0] if result.face_blendshapes else [],
+                baseline_expression,
+                current_capture_mode
+            )
             quality_ok = quality["quality_ok"]
+
+            # -------------------------------------------------
+            # Teeth-specific gating (only for TEETH modes)
+            # -------------------------------------------------
+            teeth_ok = True
+            teeth_hint = None
+
+            if current_capture_mode in ["TEETH_SMILE", "TEETH_OPEN"]:
+                ratio = compute_mouth_open_ratio(face, w, h)
+
+                if current_capture_mode == "TEETH_SMILE":
+                    teeth_ok = ratio <= TEETH_CLOSED_MAX
+                    if not teeth_ok:
+                        teeth_hint = "Smile naturally (close mouth slightly)"
+
+                elif current_capture_mode == "TEETH_OPEN":
+                    teeth_ok = ratio >= TEETH_OPEN_MIN
+                    if not teeth_ok:
+                        teeth_hint = "Open mouth gently (show teeth)"
+
+                # store teeth proof in metrics
+                quality["mouth_open_ratio"] = float(ratio)
+                quality["teeth_ok"] = bool(teeth_ok)
+
+                # show mouth bounding box
+                mouth_color = (0, 255, 0) if teeth_ok else (0, 0, 255)
+                draw_mouth_box(frame, face, w, h, color=mouth_color)
+
+                # merge into overall quality
+                quality_ok = quality_ok and teeth_ok
 
             if pose_ok and quality_ok:
                 ready = stability.update(True, True, landmarks_3d)
             else:
                 ready = False
                 stability.reset()
+
 
             # ---------- Capture with Mentor Mapping Proof ----------
             if ready and current_capture_mode not in golden_meshes:
@@ -432,7 +526,11 @@ with vision.FaceLandmarker.create_from_options(options) as landmarker:
             elif not pose_ok:
                 status_text = pose_result.get("reason", mode_instruction(current_capture_mode))
             elif not quality_ok:
-                status_text = quality["message"]
+                if current_capture_mode in ["TEETH_SMILE", "TEETH_OPEN"] and teeth_hint:
+                    status_text = teeth_hint
+                else:
+                    status_text = quality["message"]
+
             elif not ready:
                 status_text = "Hold still..."
                 box_color = (0,255,255)

@@ -18,7 +18,12 @@ from feature_extractors.face_structure_features import (
 )
 from feature_extractors.eye_features import(
     extract_eye_features
+    
 )
+from feature_extractors.teeth_features import(
+    extract_teeth_features
+)
+
 
 # -------------------------------------------------
 # Validation
@@ -64,6 +69,11 @@ def build_features(session_dir: str):
 
     eye_features = extract_eye_features(session_dir)
     features["features"]["eyes"] = eye_features
+
+    print("▶ Teeth features...")
+    teeth_features = extract_teeth_features(session_dir)
+    features["features"]["teeth"] = teeth_features
+
 
     # ---------------- FUTURE MODULES ----------------
     # Eyes, cheeks, nose intentionally disabled for now

@@ -10,6 +10,8 @@ Supports:
 - FRONTAL
 - LEFT_PROFILE
 - RIGHT_PROFILE
+- TEETH_SMILE
+- TEETH_OPEN
 """
 
 import cv2
@@ -33,6 +35,10 @@ EXPR_DELTA_TOLERANCE = 0.08
 EXPR_VARIANCE_LIMIT = 0.005
 EXPR_BUFFER_SIZE = 5
 
+# Teeth thresholds
+TEETH_CLOSED_MAX = 0.30   # TEETH_SMILE should be <= this
+TEETH_OPEN_MIN   = 0.35   # TEETH_OPEN should be >= this
+
 # Landmarks
 LEFT_CHEEK = [123, 116]
 RIGHT_CHEEK = [423, 345]
@@ -41,7 +47,6 @@ LEFT_IRIS = [474, 475, 476, 477]
 # -------------------------------------------------
 # Rolling expression buffer (INTENTIONAL GLOBAL)
 # -------------------------------------------------
-
 _expression_buffer = deque(maxlen=EXPR_BUFFER_SIZE)
 
 # -------------------------------------------------
@@ -102,6 +107,7 @@ def is_expression_neutral_dynamic(blendshapes, baseline):
 
     for key in keys:
         values = [f.get(key, 0) for f in _expression_buffer]
+
         if np.var(values) > EXPR_VARIANCE_LIMIT:
             return False
 
@@ -110,6 +116,18 @@ def is_expression_neutral_dynamic(blendshapes, baseline):
                 return False
 
     return True
+
+
+def mouth_open_ratio(face, w, h):
+    """
+    (upper-lower lip distance) / (mouth width)
+    """
+    upper = np.array([face[13].x * w, face[13].y * h])
+    lower = np.array([face[14].x * w, face[14].y * h])
+    left  = np.array([face[61].x * w, face[61].y * h])
+    right = np.array([face[291].x * w, face[291].y * h])
+
+    return np.linalg.norm(upper - lower) / (np.linalg.norm(left - right) + 1e-6)
 
 # -------------------------------------------------
 # MAIN QUALITY GATEKEEPER (MODE-AWARE)
@@ -157,18 +175,55 @@ def check_frame_quality(frame_bgr, landmarks, blendshapes, baseline=None, captur
         if right == 0:
             return _fail("Improve lighting (right side)", distance_cm, blur_score)
 
+    # ---- TEETH Modes ----
+    # Teeth does NOT need lighting checks like cheeks, but mouth ratio gating is needed
+    if capture_mode in ["TEETH_SMILE", "TEETH_OPEN"]:
+        ratio = mouth_open_ratio(landmarks, w, h)
+
+        if capture_mode == "TEETH_SMILE":
+            teeth_ok = ratio <= TEETH_CLOSED_MAX
+            if not teeth_ok:
+                return {
+                    "quality_ok": False,
+                    "message": "Smile naturally (close mouth slightly)",
+                    "distance_cm": distance_cm,
+                    "blur_score": blur_score,
+                    "mouth_open_ratio": float(ratio),
+                    "teeth_ok": False
+                }
+
+        elif capture_mode == "TEETH_OPEN":
+            teeth_ok = ratio >= TEETH_OPEN_MIN
+            if not teeth_ok:
+                return {
+                    "quality_ok": False,
+                    "message": "Open mouth gently (show teeth)",
+                    "distance_cm": distance_cm,
+                    "blur_score": blur_score,
+                    "mouth_open_ratio": float(ratio),
+                    "teeth_ok": False
+                }
+
     # ---- Expression ----
     if not expression_ok:
         return _fail("Keep neutral expression", distance_cm, blur_score)
 
     # ---- PASS ----
-    return {
+    out = {
         "quality_ok": True,
         "message": "Quality OK",
         "distance_cm": distance_cm,
         "blur_score": blur_score,
         "expression_status": "Stable"
     }
+
+    # include ratio for teeth modes even when pass
+    if capture_mode in ["TEETH_SMILE", "TEETH_OPEN"]:
+        ratio = mouth_open_ratio(landmarks, w, h)
+        out["mouth_open_ratio"] = float(ratio)
+        out["teeth_ok"] = True
+
+    return out
 
 
 def _fail(msg, dist, blur):
@@ -178,4 +233,3 @@ def _fail(msg, dist, blur):
         "distance_cm": dist,
         "blur_score": blur
     }
-
