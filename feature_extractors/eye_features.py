@@ -1,42 +1,18 @@
 # feature_extractors/eye_features.py
 """
-Eye Feature Extraction (EAR)
-----------------------------
-✔ Uses canonical 2D landmarks
-✔ Scale & pose invariant
-✔ Geometry-based (no ML)
-"""
-
-import os
-import json
-import numpy as np
-
-# ----------------------------
-# MediaPipe eye landmark indices
-# ----------------------------
-LEFT_EYE = [33, 160, 158, 133, 153, 144]
-RIGHT_EYE = [362, 385, 387, 263, 373, 380]
-
-# Order explanation reported below
-
-# ----------------------------
-"""
-Eye Feature Extraction – FINAL (Canonical, Calibrated)
-=====================================================
-✔ Uses canonical 2D landmarks
+Eye Feature Extraction (EAR) — FINAL (3D preferred, 2D fallback)
+---------------------------------------------------------------
+✔ Prefers canonical_3d (more stable)
+✔ Falls back to canonical_2d if 3D not saved yet
 ✔ IOD-normalized (scale invariant)
-✔ Physiological EAR range
-✔ Stable for Prakriti support (not diagnostic)
+✔ Returns left/right/avg EAR + iod
 """
 
 import os
 import json
 import numpy as np
 
-
-# ----------------------------
 # MediaPipe eye landmark indices
-# ----------------------------
 LEFT_EYE = [33, 160, 158, 133, 153, 144]
 RIGHT_EYE = [362, 385, 387, 263, 373, 380]
 
@@ -45,84 +21,85 @@ RIGHT_EYE_CORNER = 263
 
 
 # ----------------------------
-# Load canonical 2D
+# Load canonical points (3D preferred)
 # ----------------------------
-def load_canonical_2d(session_dir):
+def load_canonical_3d(session_dir):
+    """
+    DO NOT change function name (pipeline-safe)
+
+    Tries:
+      1) canonical_3d
+      2) fallback to canonical_2d (converted to 3D by adding z=0)
+    """
     path = os.path.join(session_dir, "canonical", "FRONTAL.json")
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"[EyeFeatures] Missing canonical file: {path}")
+
     with open(path, "r") as f:
         data = json.load(f)
-    return np.array(data["canonical_2d"], dtype=np.float32)
+
+    # ✅ Use canonical_3d if present
+    if "canonical_3d" in data and data["canonical_3d"] is not None:
+        pts3d = np.array(data["canonical_3d"], dtype=np.float32)
+        if pts3d.ndim != 2 or pts3d.shape[1] != 3:
+            raise ValueError("[EyeFeatures] canonical_3d must be shape (N,3)")
+        return pts3d
+
+    # ✅ Fallback: canonical_2d -> make it (N,3) by adding z=0
+    if "canonical_2d" in data and data["canonical_2d"] is not None:
+        pts2d = np.array(data["canonical_2d"], dtype=np.float32)
+        if pts2d.ndim != 2 or pts2d.shape[1] != 2:
+            raise ValueError("[EyeFeatures] canonical_2d must be shape (N,2)")
+        pts3d = np.hstack([pts2d, np.zeros((pts2d.shape[0], 1), dtype=np.float32)])
+        return pts3d
+
+    raise ValueError("[EyeFeatures] No canonical_3d or canonical_2d found in FRONTAL.json")
 
 
 # ----------------------------
-# Geometry helpers
+# Geometry helper
 # ----------------------------
 def dist(a, b):
-    return np.linalg.norm(a - b)
+    return float(np.linalg.norm(a - b))
 
 
 # ----------------------------
 # EAR computation (IOD-normalized)
 # ----------------------------
-def compute_ear(pts2d, eye_indices, iod):
-    """
-    pts2d: canonical_2d [N,2]
-    eye_indices: 6 indices (MediaPipe)
-    iod: inter-ocular distance
-    """
+def compute_ear(pts3d, eye_indices, iod):
+    p1, p2, p3, p4, p5, p6 = [pts3d[i] for i in eye_indices]
 
-    p1, p2, p3, p4, p5, p6 = [pts2d[i] for i in eye_indices]
-
-    # Vertical distances
     v1 = dist(p2, p6)
     v2 = dist(p3, p5)
+    h  = dist(p1, p4)
 
-    # Horizontal eye width
-    h = dist(p1, p4)
-
-    # Normalize all lengths by IOD
+    # Normalize by IOD
     v1 /= iod
     v2 /= iod
     h  /= iod
 
     ear = (v1 + v2) / (2.0 * h + 1e-6)
-    return ear
+    return float(ear)
 
 
 # ----------------------------
-# Main extractor (FINAL)
+# Main extractor (DO NOT CHANGE NAME)
 # ----------------------------
 def extract_eye_features(session_dir):
-    pts2d = load_canonical_2d(session_dir)
+    pts3d = load_canonical_3d(session_dir)
 
-    # ==========================
-    # Global scale anchor (IOD)
-    # ==========================
-    iod = dist(
-        pts2d[LEFT_EYE_CORNER],
-        pts2d[RIGHT_EYE_CORNER]
-    )
+    iod = dist(pts3d[LEFT_EYE_CORNER], pts3d[RIGHT_EYE_CORNER])
     iod = max(iod, 1e-6)
 
-    # ==========================
-    # EAR computation
-    # ==========================
-    left_ear  = compute_ear(pts2d, LEFT_EYE, iod)
-    right_ear = compute_ear(pts2d, RIGHT_EYE, iod)
-
-    ear_avg = (left_ear + right_ear) / 2.0
-
-    # ==========================
-    # Physiological clamp (safety)
-    # ==========================
-    ear_avg   = float(np.clip(ear_avg,   0.15, 0.45))
-    left_ear  = float(np.clip(left_ear,  0.15, 0.45))
-    right_ear = float(np.clip(right_ear, 0.15, 0.45))
+    left_ear = compute_ear(pts3d, LEFT_EYE, iod)
+    right_ear = compute_ear(pts3d, RIGHT_EYE, iod)
+    avg_ear = (left_ear + right_ear) / 2.0
 
     return {
         "left_EAR": round(left_ear, 3),
         "right_EAR": round(right_ear, 3),
-        "avg_EAR": round(ear_avg, 3)
+        "avg_EAR": round(avg_ear, 3),
+        "iod": round(iod, 6)
     }
 
 
@@ -137,5 +114,4 @@ if __name__ == "__main__":
         exit(1)
 
     session_dir = sys.argv[1]
-    features = extract_eye_features(session_dir)
-    print(features)
+    print(extract_eye_features(session_dir))
